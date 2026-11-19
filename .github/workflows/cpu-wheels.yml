@@ -1,0 +1,114 @@
+name: Public native CPU wheel experiment
+'on':
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Native target; Intel builds source, ARM probes existing public wheels
+        type: choice
+        options: [x86_64, arm64]
+        default: x86_64
+      artifact_mode:
+        description: Default20MiB text evidence; optional256MiB aggregate wheel sharing
+        type: choice
+        options: [none, evidence, wheels]
+        default: evidence
+permissions:
+  contents: read
+concurrency:
+  group: public-cpu-wheels-${{ inputs.architecture }}
+  cancel-in-progress: true
+jobs:
+  cpu-wheels:
+    # Fail closed before allocating a runner if copied into a private repository.
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.visibility == 'public' && github.event.repository.private == false }}
+    runs-on: ${{ inputs.architecture == 'arm64' && 'macos-15' || 'macos-15-intel' }}
+    timeout-minutes: 180
+    env:
+      PUBLIC_REPOSITORY: ${{ github.event.repository.visibility == 'public' && github.event.repository.private == false }}
+      EXPECTED_ARCH: ${{ inputs.architecture }}
+      ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+    steps:
+      - name: Check out this public recipe only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - name: Check native standard runner
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          test "$PUBLIC_REPOSITORY" = true
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          translated=$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)
+          test "$translated" != 1
+          hardware_arm=$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)
+          if test "$EXPECTED_ARCH" = x86_64 && test "$hardware_arm" = 1; then exit 1; fi
+      - name: Build or probe pinned public CPU libraries
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          python3 tools/build_cpu_wheels.py
+      - name: Freeze capped shareable artifacts
+        id: artifact-budget
+        if: ${{ always() && inputs.artifact_mode != 'none' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,os,stat
+          from pathlib import Path
+          ok=False
+          try:
+              temp=Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+              evidence=temp/'public-cpu-evidence'
+              wheels=temp/'public-cpu-wheels'
+              target=temp/'public-cpu-artifacts'
+              mode=os.environ['ARTIFACT_MODE']
+              if mode not in ('evidence','wheels'): raise ValueError('Unexpected artifact mode')
+              report_path=evidence/'build-report.json'
+              report=json.loads(report_path.read_text()) if report_path.is_file() else {}
+              share_wheels=(mode=='wheels' and report.get('passed') is True and report.get('CPUABIProbePassed') is True and len(report.get('wheels',[]))==2)
+              limit=(256 if share_wheels else 20)*1024*1024
+              if target.exists() or target.is_symlink(): raise ValueError('Snapshot already exists')
+              target.mkdir()
+              roots=[(evidence,'evidence')]+([(wheels,'wheels')] if share_wheels else [])
+              total=count=0
+              for root,prefix in roots:
+                  if root.is_symlink(): raise ValueError('Artifact source symlink')
+                  root.resolve(strict=True).relative_to(temp)
+                  for path in sorted(root.rglob('*')):
+                      value=path.lstat()
+                      if path.is_symlink(): raise ValueError('Artifact symlink')
+                      if stat.S_ISDIR(value.st_mode): continue
+                      if not stat.S_ISREG(value.st_mode): raise ValueError('Artifact special file')
+                      if prefix=='wheels' and path.suffix!='.whl': raise ValueError('Only library wheels can be shared')
+                      if prefix=='evidence' and path.suffix.lower() not in ('.txt','.json','.log','.md') and not path.name.upper().startswith(('LICENSE','COPYING','NOTICE')):
+                          raise ValueError('Only text evidence and original license notices can be shared')
+                      destination=target/prefix/path.relative_to(root)
+                      destination.parent.mkdir(parents=True,exist_ok=True)
+                      with path.open('rb') as source,destination.open('xb') as copied:
+                          while True:
+                              data=source.read(min(1024*1024,limit-total+1))
+                              if not data: break
+                              total+=len(data)
+                              if total>limit: raise ValueError('Aggregate public artifact cap exceeded; nothing uploaded')
+                              copied.write(data)
+                      count+=1
+              print(json.dumps({'files':count,'bytes':total,'aggregateLimitBytes':limit,'closedSnapshot':True,'mode':mode,'wheelsShared':share_wheels}))
+              ok=True
+          finally:
+              with open(os.environ['GITHUB_OUTPUT'],'a') as stream: stream.write('within-budget='+str(ok).lower()+'\n')
+          PY
+      - name: Upload closed bounded public evidence
+        if: ${{ always() && steps.artifact-budget.outputs.within-budget == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: public-cpu-${{ inputs.architecture }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/public-cpu-artifacts/
+          retention-days: 1
+          if-no-files-found: error
+          include-hidden-files: false
