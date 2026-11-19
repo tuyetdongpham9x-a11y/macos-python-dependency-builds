@@ -5,7 +5,7 @@ model/checkpoint downloads, private repositories, credentials or publishing.
 A timeout stops the direct subprocess parent only; runner teardown is required
 for descendants. No group signals or cleanup retries are used.
 """
-import argparse,hashlib,json,os,platform,shutil,stat,struct,subprocess,tarfile,time,urllib.parse,urllib.request,zipfile
+import argparse,hashlib,json,os,platform,re,shutil,stat,struct,subprocess,tarfile,time,urllib.parse,urllib.request,zipfile
 from pathlib import Path,PurePosixPath
 
 LOCK_SHA256="6588893c7e60b484a3e8a9b0f63a095af23ed18349ae7b20e1b742e6071121b7"
@@ -72,6 +72,68 @@ def native_environment(work,python_root):
  env={key:os.environ[key]for key in allow if key in os.environ}
  env.update(PATH=str(python_root/'bin')+os.pathsep+env.get('PATH',''),PYTHONNOUSERSITE='1',PYTHONDONTWRITEBYTECODE='1',PIP_CONFIG_FILE=os.devnull,PIP_NO_INDEX='1',PIP_DISABLE_PIP_VERSION_CHECK='1',PIP_NO_CACHE_DIR='1',GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',GIT_SSH_COMMAND='false',XDG_CACHE_HOME=str(work/'cache'),TORCH_HOME=str(work/'cache/torch'),DYLD_FALLBACK_LIBRARY_PATH=str(python_root/'lib')+':/usr/lib')
  return env
+
+def cpu_build_environment(env,version,architecture):
+ # PyTorch intentionally builds a universal host protoc before its thin target.
+ # Global Intel -march/-mtune flags would also reach that ARM64 bootstrap.
+ result=dict(env,BUILD_VERSION=version,PYTORCH_BUILD_VERSION=version,PYTORCH_BUILD_NUMBER='1',USE_CUDA='0',USE_MPS='0',USE_NATIVE_ARCH='0',USE_OPENMP='0',USE_MKL='0',USE_DISTRIBUTED='0',USE_GLOO='0',USE_TENSORPIPE='0',USE_KINETO='0',BLAS='Accelerate',BUILD_TEST='0',MAX_JOBS='2',CMAKE_BUILD_PARALLEL_LEVEL='2',MACOSX_DEPLOYMENT_TARGET='15.0',CMAKE_OSX_ARCHITECTURES=architecture,ARCHFLAGS='-arch '+architecture,TORCHVISION_USE_PNG='0',TORCHVISION_USE_JPEG='0',TORCHVISION_USE_FFMPEG='0',TORCHVISION_USE_VIDEO_CODEC='0')
+ result.pop('CFLAGS',None);result.pop('CXXFLAGS',None)
+ return result
+
+def cache_values(path):
+ if path.is_symlink() or not path.is_file() or path.stat().st_size>1024*1024:raise ValueError('Missing or unbounded main CMake cache')
+ values={}
+ for line in path.read_text(encoding='utf-8',errors='strict').splitlines():
+  if not line or line.startswith(('#','//'))or'='not in line or':'not in line.split('=',1)[0]:continue
+  key,value=line.split('=',1);values[key.split(':',1)[0]]=value
+ return values
+
+def verify_cpu_cache(source,architecture):
+ path=source/'build/CMakeCache.txt';values=cache_values(path)
+ required=('USE_CUDA','USE_MPS','USE_OPENMP','USE_NATIVE_ARCH','USE_MKL','USE_DISTRIBUTED','BUILD_TEST')
+ optional=('USE_GLOO','USE_TENSORPIPE','USE_KINETO')
+ false_values={'0','OFF','FALSE','NO','N','IGNORE','NOTFOUND',''}
+ for key in required:
+  if key not in values or values[key].upper()not in false_values:raise ValueError('Actual main cache must disable '+key)
+ for key in optional:
+  if key in values and values[key].upper()not in false_values:raise ValueError('Actual main cache unexpectedly enables '+key)
+ if values.get('CMAKE_OSX_ARCHITECTURES')!=architecture or values.get('CMAKE_OSX_DEPLOYMENT_TARGET')!='15.0' or values.get('BLAS')!='Accelerate':raise ValueError('Actual main architecture/deployment/BLAS cache differs')
+ for key in ('CMAKE_C_FLAGS','CMAKE_CXX_FLAGS'):
+  if key not in values or re.search(r'(?:^|\s)-(?:march|mtune|mcpu)(?:=|\s)',values[key]):raise ValueError('Global processor-specific CMake flags are not allowed')
+ keys=(*required,*optional,'CMAKE_OSX_ARCHITECTURES','CMAKE_OSX_DEPLOYMENT_TARGET','BLAS','CMAKE_C_FLAGS','CMAKE_CXX_FLAGS')
+ return {'passed':True,'source':'actual main build/CMakeCache.txt','cacheSHA256':sha(path),'values':{key:values.get(key)for key in keys},'scope':'Effective main configuration only; not a successful build or kernel test by itself'}
+
+def collect_cmake_diagnostics(source,output):
+ # Only generated CMake diagnostics under two known public build roots. Never
+ # collect source trees, an environment dump, home, downloaded archives or keys.
+ output.mkdir(parents=True,exist_ok=True)
+ files=[];errors=[];total=visited=0;stop=min(DEADLINE,time.monotonic()+3);content_limit=6*1024*1024-65536
+ names={'CMakeCache.txt','CMakeConfigureLog.yaml','CMakeError.log','CMakeOutput.log'}
+ for area in (source/'build',source/'build_host_protoc'):
+  if not area.is_dir()or area.is_symlink():continue
+  for current,dirs,leaves in os.walk(area,followlinks=False):
+   visited+=1;directory=Path(current)
+   if time.monotonic()>=stop or visited>5000 or len(files)>=12 or total>=content_limit:break
+   dirs[:]=[name for name in dirs if not(directory/name).is_symlink()and len((directory/name).relative_to(area).parts)<=5]
+   for name in sorted(set(leaves)&names):
+    path=directory/name
+    if path.is_symlink()or not stat.S_ISREG(path.stat().st_mode):continue
+    path.resolve(strict=True).relative_to(source.resolve(strict=True))
+    if time.monotonic()>=stop or len(files)>=12:break
+    limit=min(1024*1024,content_limit-total)
+    if limit<=0:break
+    size=path.stat().st_size
+    with path.open('rb')as stream:
+     if size>limit:
+      first=limit//2;data=stream.read(first);stream.seek(max(first,size-(limit-first)));data+=stream.read(limit-first)
+     else:data=stream.read(limit)
+    target=output/(str(len(files)).zfill(2)+'-'+name+'.txt');target.write_bytes(data);total+=len(data)
+    files.append({'source':path.relative_to(source).as_posix(),'file':target.name,'bytes':len(data),'sha256':sha(target),'truncated':size>len(data)})
+  if time.monotonic()>=stop or visited>5000 or len(files)>=12 or total>=content_limit:break
+ result={'files':files,'bytes':total,'fileLimit':12,'aggregateLimitBytes':6*1024*1024,'metadataReserveBytes':65536,'perFileLimitBytes':1024*1024,'directoryVisitLimit':5000,'timeLimitSeconds':3,'errors':errors}
+ data=(json.dumps(result,indent=2)+'\n').encode()
+ if len(data)>65536:raise ValueError('CMake diagnostic metadata bound exceeded')
+ (output/'index.json').write_bytes(data);return result
 
 def git_source(pin,target,env,out):
  # Exact commits pin the recursive gitlinks; never use --remote or floating tags.
@@ -172,9 +234,19 @@ def main():
   if arch=='x86_64':
    for name in ('torch','torchvision'):
     pin=lock['sources'][name];source=work/(name+'-source');dest=out/name;dest.mkdir();record=git_source(pin,source,env,dest);report.setdefault('sources',{})[name]=record
-    build_env=dict(env,BUILD_VERSION=pin['version'],PYTORCH_BUILD_VERSION=pin['version'],PYTORCH_BUILD_NUMBER='1',USE_CUDA='0',USE_MPS='0',USE_NATIVE_ARCH='0',CFLAGS='-march=x86-64 -mtune=generic',CXXFLAGS='-march=x86-64 -mtune=generic',USE_OPENMP='0',USE_MKL='0',USE_DISTRIBUTED='0',USE_GLOO='0',USE_TENSORPIPE='0',USE_KINETO='0',BLAS='Accelerate',BUILD_TEST='0',MAX_JOBS='2',CMAKE_BUILD_PARALLEL_LEVEL='2',MACOSX_DEPLOYMENT_TARGET='15.0',CMAKE_OSX_ARCHITECTURES=arch,ARCHFLAGS='-arch '+arch,TORCHVISION_USE_PNG='0',TORCHVISION_USE_JPEG='0',TORCHVISION_USE_FFMPEG='0',TORCHVISION_USE_VIDEO_CODEC='0')
+    build_env=cpu_build_environment(env,pin['version'],arch)
     wheel_dir=work/(name+'-built');wheel_dir.mkdir()
-    run([python,'-I','-m','pip','wheel','--no-index','--no-deps','--no-build-isolation','--no-cache-dir','--wheel-dir',wheel_dir,source],dest/'build.log',build_env,150*60)
+    try:
+     run([python,'-I','-m','pip','wheel','--no-index','--no-deps','--no-build-isolation','--no-cache-dir','--wheel-dir',wheel_dir,source],dest/'build.log',build_env,150*60)
+    except Exception:
+     try:record['cmakeDiagnostics']=collect_cmake_diagnostics(source,dest/'cmake-diagnostics')
+     except Exception as diagnostic_error:record['cmakeDiagnosticError']=str(diagnostic_error)
+     if name=='torch':
+      try:record['effectiveCPUConfiguration']=verify_cpu_cache(source,arch)
+      except Exception as configuration_error:record['effectiveCPUConfiguration']={'passed':False,'error':str(configuration_error)}
+     raise
+    record['cmakeDiagnostics']=collect_cmake_diagnostics(source,dest/'cmake-diagnostics')
+    if name=='torch':record['effectiveCPUConfiguration']=verify_cpu_cache(source,arch)
     built=list(wheel_dir.glob('*.whl'))
     if len(built)!=1:raise ValueError('Expected exactly one public source-built wheel')
     wheels.append(built[0]);run([python,'-I','-m','pip','install','--no-index','--no-deps',built[0]],dest/'install.log',env,180)

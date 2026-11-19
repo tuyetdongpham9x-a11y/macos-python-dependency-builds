@@ -6,12 +6,18 @@ The manual workflow uses standard `macos-15-intel` or `macos-15` runners and ref
 
 ## Exact experiment
 
-- Intel: build the unmodified public PyTorch 2.13.0 and TorchVision 0.28.0 source commits in `public-lock.json`, with CPU-only controls and Apple's Accelerate BLAS. `USE_NATIVE_ARCH=0` and baseline `-march=x86-64 -mtune=generic` flags avoid a native-only CPU target. CUDA, MPS, OpenMP, MKL and distributed backends are disabled; image/video codecs in TorchVision are disabled. This is a deliberately scoped CPU dependency experiment.
+- Intel: build the unmodified public PyTorch 2.13.0 and TorchVision 0.28.0 source commits in `public-lock.json`, with CPU-only controls and Apple's Accelerate BLAS. Keep the compiler's standard baseline with `USE_NATIVE_ARCH=0` and an explicit thin `CMAKE_OSX_ARCHITECTURES=x86_64` target. No global `CFLAGS` or `CXXFLAGS` processor flags are forwarded. CUDA, MPS, OpenMP, MKL and distributed backends are disabled; image/video codecs in TorchVision are disabled. This is a deliberately scoped CPU dependency experiment.
 - ARM: install the already public hash-pinned ARM wheels and run the same CPU ABI probe. This does not rebuild or claim CPU-only contents for the official ARM wheel, which may include MPS support.
 - Both: use the hash-pinned CPython 3.11.18 bootstrap, NumPy 2.2.6 and explicit offline build/runtime dependencies. Public CMake 4.1.2 and Ninja 1.13.0 wheels are pinned by SHA-256 too. Pip never resolves extra packages or rewrites package metadata.
 - Force `ATEN_CPU_CAPABILITY=default` for the probe and verify Intel reports the generic fallback. Probe only tensor/NumPy interchange, FFT, a small linear-algebra kernel and native TorchVision NMS. It downloads no model weights and proves no application inference, separation, GPU, installer or customer compatibility.
 
 The Torch source is pinned to `cf30153c4c131c8164ee7798e5022d810682e2cb`; Vision to `8fb87713a24951e639c494b0f2a8a81b5f8e33a6`. Recursive Torch submodules follow immutable gitlinks, never `--remote`. No source patches or version-metadata workarounds are applied.
+
+The pinned Torch CMake source deliberately builds a universal Intel/ARM host `protoc` before the thin target. The first Intel trial reached that bootstrap and stopped while finding Threads. Global Intel `-march` flags can invalidate its ARM compiler probes, so this recipe removes those global flags without changing upstream sources. This explains a concrete compiler incompatibility; a successful native Threads/protoc build is still unverified until the next run.
+
+After a successful Torch wheel build, the actual main `build/CMakeCache.txt` must confirm the requested CPU-only flags, Accelerate BLAS, thin Intel architecture, macOS 15 target and absence of global processor-specific flags. A platform-capability message such as “MPS supported” is not used as proof that MPS is enabled or disabled. The final installed-library CPU ABI probe remains required before wheel sharing.
+
+On configuration/build failure, capture only generated CMake caches and configure/error/output logs under the known `build` and `build_host_protoc` directories. Collection is bounded to 12 files, 1 MiB per file, 6 MiB aggregate and a three-second/5,000-directory scan budget. Larger files retain bounded head/tail excerpts. These diagnostics fit within the existing evidence cap; source trees, environment dumps and build binaries are never uploaded.
 
 ## Manual operation
 

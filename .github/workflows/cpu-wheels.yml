@@ -110,7 +110,7 @@ jobs:
         if: ${{ always() && steps.artifact-budget.outputs.within-budget == 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: public-cpu-${{ inputs.architecture }}-${{ github.run_id }}
+          name: public-cpu-${{ inputs.architecture || 'x86_64' }}-${{ github.run_id }}
           path: ${{ runner.temp }}/public-cpu-artifacts/
           retention-days: 1
           if-no-files-found: error
