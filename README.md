@@ -15,7 +15,7 @@ The Torch source is pinned to `cf30153c4c131c8164ee7798e5022d810682e2cb`; Vision
 
 ## Manual operation
 
-After reviewing this exact public scope, run **Public native CPU wheel experiment** manually. Choose `x86_64` for the source build or `arm64` for the public-wheel ABI probe. The workflow has no push, schedule or pull-request trigger and no secrets input.
+After reviewing this exact public scope, run **Public native CPU wheel experiment** manually. Choose `x86_64` for the source build or `arm64` for the public-wheel ABI probe. This trial branch additionally accepts one exact-path push on `ci/intel-cpu-source-20261119-01`; the default branch retains the reviewed manual-only workflow. The push profile selects Intel and bounded wheel sharing. There is no schedule or pull-request trigger and no secrets input.
 
 The job hardcap is 180 minutes; the driver stops after at most 170 minutes. Only two build workers are used. A standard runner has limited memory and disk: the driver refuses to start below 8 GiB free, but the complete source build may still exceed disk, memory or time and fail. Successful Intel compilation has **not been established** by preparation of this recipe. Clang, Xcode and SDK versions are recorded from the moving runner image; byte-identical wheel reproduction across image changes is not promised.
 

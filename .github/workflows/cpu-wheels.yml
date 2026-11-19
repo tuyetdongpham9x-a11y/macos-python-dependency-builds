@@ -1,5 +1,8 @@
 name: Public native CPU wheel experiment
 'on':
+  push:
+    branches: [ci/intel-cpu-source-20261119-01]
+    paths: [.github/workflows/cpu-wheels.yml]
   workflow_dispatch:
     inputs:
       architecture:
@@ -15,18 +18,18 @@ name: Public native CPU wheel experiment
 permissions:
   contents: read
 concurrency:
-  group: public-cpu-wheels-${{ inputs.architecture }}
+  group: public-cpu-wheels-${{ inputs.architecture || 'x86_64' }}
   cancel-in-progress: true
 jobs:
   cpu-wheels:
     # Fail closed before allocating a runner if copied into a private repository.
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.visibility == 'public' && github.event.repository.private == false }}
+    if: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/ci/intel-cpu-source-20261119-01')) && github.event.repository.visibility == 'public' && github.event.repository.private == false }}
     runs-on: ${{ inputs.architecture == 'arm64' && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 180
     env:
       PUBLIC_REPOSITORY: ${{ github.event.repository.visibility == 'public' && github.event.repository.private == false }}
-      EXPECTED_ARCH: ${{ inputs.architecture }}
-      ARTIFACT_MODE: ${{ inputs.artifact_mode }}
+      EXPECTED_ARCH: ${{ inputs.architecture || 'x86_64' }}
+      ARTIFACT_MODE: ${{ inputs.artifact_mode || 'wheels' }}
     steps:
       - name: Check out this public recipe only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
