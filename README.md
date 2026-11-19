@@ -1,4 +1,32 @@
-# Pinned public CPU wheel experiment
+# Public native ARM CPU library probe
+
+## Fixed public ARM probe profile
+
+This branch is a separate, one-profile ARM check. Automatic runs are restricted
+to `ci/arm-cpu-probe-20261119-01` and this workflow path; manual dispatch also
+requires that exact branch. It uses the standard `macos-26` runner, checks real
+`arm64` hardware without translation, and has a whole-job limit of ten minutes.
+A public-repository condition is evaluated before runner allocation. Its ARM
+concurrency group is separate from the active Intel source-build experiment.
+
+The five other approved files, including driver, lock and probe, are unchanged.
+The existing ARM mode installs the pinned official public CPython/NumPy/Torch/
+TorchVision wheels and tests CPU tensor/NumPy interop, FFT, SVD and native vision
+NMS. It does not build Torch from source or acquire weights/application code.
+Official ARM wheels may contain MPS support; this profile performs CPU operations
+and reports that capability rather than claiming it was removed or using a GPU.
+
+Only a closed text-evidence snapshot of at most 20 MiB can be uploaded for one
+day. No wheel-sharing mode or caller-controlled architecture is available in
+this profile. A timeout can prevent final evidence upload; it is not a successful
+probe. No application, model, activation or customer-release result is implied.
+The ten-minute public probe consumes no private-repository compute quota.
+
+## Background: original multi-architecture experiment
+
+The retained notes below describe the original generic profiles on other
+branches. Their selectable architectures, artifact modes, runner labels and
+170/180-minute Intel limits do not apply to this fixed ten-minute ARM profile.
 
 This repository contains only a generic build recipe, public dependency URLs and checksums, and a small tensor ABI probe. It has no application sources, commercial product branding, workers, model checkpoints, activation material, private endpoints, private repositories or credentials. No other repository or application checkout is accepted as input.
 

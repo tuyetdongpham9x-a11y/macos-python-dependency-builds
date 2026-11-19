@@ -1,36 +1,24 @@
-# Retry: the pinned source selects Apple Accelerate with BLAS=vecLib.
-name: Public native CPU wheel experiment
+name: Public native ARM CPU library probe
 'on':
   push:
-    branches: [ci/intel-cpu-source-20261119-01]
+    branches: [ci/arm-cpu-probe-20261119-01]
     paths: [.github/workflows/cpu-wheels.yml]
-  workflow_dispatch:
-    inputs:
-      architecture:
-        description: Native target; Intel builds source, ARM probes existing public wheels
-        type: choice
-        options: [x86_64, arm64]
-        default: x86_64
-      artifact_mode:
-        description: Default20MiB text evidence; optional256MiB aggregate wheel sharing
-        type: choice
-        options: [none, evidence, wheels]
-        default: evidence
+  workflow_dispatch: {}
 permissions:
   contents: read
 concurrency:
-  group: public-cpu-wheels-${{ inputs.architecture || 'x86_64' }}
+  group: public-cpu-wheels-arm64
   cancel-in-progress: true
 jobs:
   cpu-wheels:
     # Fail closed before allocating a runner if copied into a private repository.
-    if: ${{ (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/ci/intel-cpu-source-20261119-01')) && github.event.repository.visibility == 'public' && github.event.repository.private == false }}
-    runs-on: ${{ inputs.architecture == 'arm64' && 'macos-15' || 'macos-15-intel' }}
-    timeout-minutes: 180
+    if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/ci/arm-cpu-probe-20261119-01' && github.event.repository.visibility == 'public' && github.event.repository.private == false }}
+    runs-on: macos-26
+    timeout-minutes: 10
     env:
       PUBLIC_REPOSITORY: ${{ github.event.repository.visibility == 'public' && github.event.repository.private == false }}
-      EXPECTED_ARCH: ${{ inputs.architecture || 'x86_64' }}
-      ARTIFACT_MODE: ${{ inputs.artifact_mode || 'wheels' }}
+      EXPECTED_ARCH: arm64
+      ARTIFACT_MODE: evidence
     steps:
       - name: Check out this public recipe only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -40,7 +28,7 @@ jobs:
           persist-credentials: false
           submodules: false
           lfs: false
-      - name: Check native standard runner
+      - name: Check native standard ARM runner
         run: |
           set -euo pipefail
           umask 077
@@ -50,8 +38,10 @@ jobs:
           translated=$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)
           test "$translated" != 1
           hardware_arm=$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)
-          if test "$EXPECTED_ARCH" = x86_64 && test "$hardware_arm" = 1; then exit 1; fi
-      - name: Build or probe pinned public CPU libraries
+          test "$hardware_arm" = 1
+          os_version=$(sw_vers -productVersion)
+          case "$os_version" in 26.*) ;; *) exit 1 ;; esac
+      - name: Probe existing pinned public ARM CPU libraries
         run: |
           set -euo pipefail
           umask 077
@@ -59,7 +49,7 @@ jobs:
           python3 tools/build_cpu_wheels.py
       - name: Freeze capped shareable artifacts
         id: artifact-budget
-        if: ${{ always() && inputs.artifact_mode != 'none' }}
+        if: ${{ always() }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -69,17 +59,13 @@ jobs:
           try:
               temp=Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
               evidence=temp/'public-cpu-evidence'
-              wheels=temp/'public-cpu-wheels'
               target=temp/'public-cpu-artifacts'
-              mode=os.environ['ARTIFACT_MODE']
-              if mode not in ('evidence','wheels'): raise ValueError('Unexpected artifact mode')
-              report_path=evidence/'build-report.json'
-              report=json.loads(report_path.read_text()) if report_path.is_file() else {}
-              share_wheels=(mode=='wheels' and report.get('passed') is True and report.get('CPUABIProbePassed') is True and len(report.get('wheels',[]))==2)
-              limit=(256 if share_wheels else 20)*1024*1024
+              mode='evidence'
+              share_wheels=False
+              limit=20*1024*1024
               if target.exists() or target.is_symlink(): raise ValueError('Snapshot already exists')
               target.mkdir()
-              roots=[(evidence,'evidence')]+([(wheels,'wheels')] if share_wheels else [])
+              roots=[(evidence,'evidence')]
               total=count=0
               for root,prefix in roots:
                   if root.is_symlink(): raise ValueError('Artifact source symlink')
@@ -89,7 +75,6 @@ jobs:
                       if path.is_symlink(): raise ValueError('Artifact symlink')
                       if stat.S_ISDIR(value.st_mode): continue
                       if not stat.S_ISREG(value.st_mode): raise ValueError('Artifact special file')
-                      if prefix=='wheels' and path.suffix!='.whl': raise ValueError('Only library wheels can be shared')
                       if prefix=='evidence' and path.suffix.lower() not in ('.txt','.json','.log','.md') and not path.name.upper().startswith(('LICENSE','COPYING','NOTICE')):
                           raise ValueError('Only text evidence and original license notices can be shared')
                       destination=target/prefix/path.relative_to(root)
@@ -111,7 +96,7 @@ jobs:
         if: ${{ always() && steps.artifact-budget.outputs.within-budget == 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: public-cpu-${{ inputs.architecture || 'x86_64' }}-${{ github.run_id }}
+          name: public-cpu-arm64-${{ github.run_id }}
           path: ${{ runner.temp }}/public-cpu-artifacts/
           retention-days: 1
           if-no-files-found: error
