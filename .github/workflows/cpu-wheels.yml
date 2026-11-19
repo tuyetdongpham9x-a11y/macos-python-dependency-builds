@@ -1,3 +1,4 @@
+# Retry: the pinned source selects Apple Accelerate with BLAS=vecLib.
 name: Public native CPU wheel experiment
 'on':
   push:

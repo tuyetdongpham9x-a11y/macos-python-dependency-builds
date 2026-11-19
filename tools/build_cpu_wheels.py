@@ -76,7 +76,7 @@ def native_environment(work,python_root):
 def cpu_build_environment(env,version,architecture):
  # PyTorch intentionally builds a universal host protoc before its thin target.
  # Global Intel -march/-mtune flags would also reach that ARM64 bootstrap.
- result=dict(env,BUILD_VERSION=version,PYTORCH_BUILD_VERSION=version,PYTORCH_BUILD_NUMBER='1',USE_CUDA='0',USE_MPS='0',USE_NATIVE_ARCH='0',USE_OPENMP='0',USE_MKL='0',USE_DISTRIBUTED='0',USE_GLOO='0',USE_TENSORPIPE='0',USE_KINETO='0',BLAS='Accelerate',BUILD_TEST='0',MAX_JOBS='2',CMAKE_BUILD_PARALLEL_LEVEL='2',MACOSX_DEPLOYMENT_TARGET='15.0',CMAKE_OSX_ARCHITECTURES=architecture,ARCHFLAGS='-arch '+architecture,TORCHVISION_USE_PNG='0',TORCHVISION_USE_JPEG='0',TORCHVISION_USE_FFMPEG='0',TORCHVISION_USE_VIDEO_CODEC='0')
+ result=dict(env,BUILD_VERSION=version,PYTORCH_BUILD_VERSION=version,PYTORCH_BUILD_NUMBER='1',USE_CUDA='0',USE_MPS='0',USE_NATIVE_ARCH='0',USE_OPENMP='0',USE_MKL='0',USE_DISTRIBUTED='0',USE_GLOO='0',USE_TENSORPIPE='0',USE_KINETO='0',BLAS='vecLib',BUILD_TEST='0',MAX_JOBS='2',CMAKE_BUILD_PARALLEL_LEVEL='2',MACOSX_DEPLOYMENT_TARGET='15.0',CMAKE_OSX_ARCHITECTURES=architecture,ARCHFLAGS='-arch '+architecture,TORCHVISION_USE_PNG='0',TORCHVISION_USE_JPEG='0',TORCHVISION_USE_FFMPEG='0',TORCHVISION_USE_VIDEO_CODEC='0')
  result.pop('CFLAGS',None);result.pop('CXXFLAGS',None)
  return result
 
@@ -97,7 +97,7 @@ def verify_cpu_cache(source,architecture):
   if key not in values or values[key].upper()not in false_values:raise ValueError('Actual main cache must disable '+key)
  for key in optional:
   if key in values and values[key].upper()not in false_values:raise ValueError('Actual main cache unexpectedly enables '+key)
- if values.get('CMAKE_OSX_ARCHITECTURES')!=architecture or values.get('CMAKE_OSX_DEPLOYMENT_TARGET')!='15.0' or values.get('BLAS')!='Accelerate':raise ValueError('Actual main architecture/deployment/BLAS cache differs')
+ if values.get('CMAKE_OSX_ARCHITECTURES')!=architecture or values.get('CMAKE_OSX_DEPLOYMENT_TARGET')!='15.0' or values.get('BLAS')!='vecLib':raise ValueError('Actual main architecture/deployment/BLAS cache differs')
  for key in ('CMAKE_C_FLAGS','CMAKE_CXX_FLAGS'):
   if key not in values or re.search(r'(?:^|\s)-(?:march|mtune|mcpu)(?:=|\s)',values[key]):raise ValueError('Global processor-specific CMake flags are not allowed')
  keys=(*required,*optional,'CMAKE_OSX_ARCHITECTURES','CMAKE_OSX_DEPLOYMENT_TARGET','BLAS','CMAKE_C_FLAGS','CMAKE_CXX_FLAGS')

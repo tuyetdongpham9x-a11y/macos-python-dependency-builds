@@ -30,3 +30,22 @@ The default artifact is a closed text-evidence snapshot capped at **20 MiB total
 Every library wheel is checked for safe ZIP paths, CRC, bounded expanded size, native Mach-O architecture and original upstream license notices. Generated wheel hashes and actual compiler versions are recorded. A timeout stops/reaps the direct subprocess parent only; compiler descendants can remain until normal runner teardown. There are no process-group signals, cleanup retries, privilege changes or paid-runner fallbacks.
 
 This recipe's MIT license applies only to these recipe/probe files. The dependencies keep their original licenses; see [UPSTREAM-NOTICES.md](UPSTREAM-NOTICES.md). Nothing here grants a license to unrelated applications or private assets.
+
+## Pinned-source BLAS selector correction
+
+The second native Intel attempt completed the universal host-protoc bootstrap,
+then CMake rejected `BLAS=Accelerate`. At the pinned PyTorch commit
+`cf30153c4c131c8164ee7798e5022d810682e2cb`, the accepted selector is `vecLib`.
+Its unmodified finder locates vecLib inside the Apple Accelerate framework and
+uses `-framework Accelerate`. The recipe now requests and checks `BLAS=vecLib`;
+this keeps the Apple numerical backend. No source, package version, feature,
+CPU fallback, worker, time or artifact limit is changed.
+
+Primary source:
+- [Pinned BLAS selection](https://github.com/pytorch/pytorch/blob/cf30153c4c131c8164ee7798e5022d810682e2cb/cmake/Dependencies.cmake)
+- [Pinned Apple framework finder](https://github.com/pytorch/pytorch/blob/cf30153c4c131c8164ee7798e5022d810682e2cb/cmake/Modules/FindvecLib.cmake)
+
+Local CMake branch tests can check this selector/finder contract with controlled
+headers; they do not compile or link PyTorch against an Apple SDK. A successful
+actual native wheel build and its existing CPU/operator/NumPy probe are still
+required. No successful wheel or application-compatibility result is claimed.
