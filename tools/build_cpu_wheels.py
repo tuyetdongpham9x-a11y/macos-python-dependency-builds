@@ -1,17 +1,19 @@
 """Generic pinned public CPU wheel experiment. Never imports application sources.
 
 Only standard native public-repository runners are allowed. No source patches,
-model/checkpoint downloads, private repositories, credentials or publishing.
+model/checkpoint downloads, private repositories or publishing. A CI read token
+is used only by the isolated same-repository cache-admission mode; third-party
+build and probe subprocesses never receive it.
 A timeout stops the direct subprocess parent only; runner teardown is required
 for descendants. No group signals or cleanup retries are used.
 """
-import argparse,hashlib,json,os,platform,re,shutil,stat,struct,subprocess,tarfile,time,urllib.parse,urllib.request,zipfile
+import argparse,hashlib,json,os,platform,re,shutil,stat,struct,subprocess,tarfile,time,sys,urllib.parse,urllib.request,zipfile
 from pathlib import Path,PurePosixPath
 
-LOCK_SHA256="6588893c7e60b484a3e8a9b0f63a095af23ed18349ae7b20e1b742e6071121b7"
+LOCK_SHA256="fe5b8aebd65943bbcca3b80cce97a7ab72218a493882efc2f7d68b69c977d932"
 DEADLINE=None
 PHASES=[]
-MAX_SECONDS=170*60
+MAX_SECONDS=280*60
 MAX_WHEEL_EXPANDED=2*1024*1024*1024
 
 class BuildStopped(RuntimeError):pass
@@ -27,7 +29,7 @@ def save(path,value):
 
 def run(command,log,env,seconds=3600,cwd=None):
  remaining=DEADLINE-time.monotonic()
- if remaining<=0:raise BuildStopped('170-minute driver deadline reached')
+ if remaining<=0:raise BuildStopped('280-minute driver deadline reached')
  row={'phase':log.stem,'command':list(map(str,command)),'timeoutSeconds':min(seconds,remaining),'passed':False};PHASES.append(row)
  log.parent.mkdir(parents=True,exist_ok=True);started=time.monotonic();print('PHASE '+log.stem,flush=True)
  try:
@@ -68,9 +70,13 @@ def download(entry,folder):
 def native_environment(work,python_root):
  # Do not forward repository tokens, runtime tokens, package index credentials,
  # or unrelated environment into third-party build/probe subprocesses.
- allow=('PATH','HOME','TMPDIR','LANG','LC_ALL','LC_CTYPE','SDKROOT','DEVELOPER_DIR')
+ allow=('PATH','HOME','TMPDIR','LANG','LC_ALL','LC_CTYPE','SDKROOT','DEVELOPER_DIR',
+        'CCACHE_DIR','CCACHE_CONFIGPATH','CCACHE_TEMPDIR','CMAKE_C_COMPILER_LAUNCHER',
+        'CMAKE_CXX_COMPILER_LAUNCHER','CMAKE_OBJC_COMPILER_LAUNCHER','CMAKE_OBJCXX_COMPILER_LAUNCHER')
  env={key:os.environ[key]for key in allow if key in os.environ}
  env.update(PATH=str(python_root/'bin')+os.pathsep+env.get('PATH',''),PYTHONNOUSERSITE='1',PYTHONDONTWRITEBYTECODE='1',PIP_CONFIG_FILE=os.devnull,PIP_NO_INDEX='1',PIP_DISABLE_PIP_VERSION_CHECK='1',PIP_NO_CACHE_DIR='1',GIT_CONFIG_NOSYSTEM='1',GIT_CONFIG_GLOBAL=os.devnull,GIT_TERMINAL_PROMPT='0',GIT_SSH_COMMAND='false',XDG_CACHE_HOME=str(work/'cache'),TORCH_HOME=str(work/'cache/torch'),DYLD_FALLBACK_LIBRARY_PATH=str(python_root/'lib')+':/usr/lib')
+ # Pinned Torch USE_CCACHE auto-find must resolve this verified tool, not a system wrapper.
+ if os.environ.get('CCACHE_EXE'):env['PATH']=str(Path(os.environ['CCACHE_EXE']).parent)+os.pathsep+env['PATH']
  return env
 
 def cpu_build_environment(env,version,architecture):
@@ -100,15 +106,20 @@ def verify_cpu_cache(source,architecture):
  if values.get('CMAKE_OSX_ARCHITECTURES')!=architecture or values.get('CMAKE_OSX_DEPLOYMENT_TARGET')!='15.0' or values.get('BLAS')!='vecLib':raise ValueError('Actual main architecture/deployment/BLAS cache differs')
  for key in ('CMAKE_C_FLAGS','CMAKE_CXX_FLAGS'):
   if key not in values or re.search(r'(?:^|\s)-(?:march|mtune|mcpu)(?:=|\s)',values[key]):raise ValueError('Global processor-specific CMake flags are not allowed')
- keys=(*required,*optional,'CMAKE_OSX_ARCHITECTURES','CMAKE_OSX_DEPLOYMENT_TARGET','BLAS','CMAKE_C_FLAGS','CMAKE_CXX_FLAGS')
+ launcher_keys=tuple('CMAKE_'+language+'_COMPILER_LAUNCHER'for language in ('C','CXX','OBJC','OBJCXX'))
+ if os.environ.get('CCACHE_EXE'):
+  for language,key in zip(('C','CXX','OBJC','OBJCXX'),launcher_keys):
+   enabled=language in ('C','CXX')or bool(values.get('CMAKE_'+language+'_COMPILER'))or key in values
+   if enabled and values.get(key)!=os.environ['CCACHE_EXE']:raise ValueError('Actual main CMake cache does not use the pinned compiler launcher: '+key)
+ keys=(*required,*optional,'CMAKE_OSX_ARCHITECTURES','CMAKE_OSX_DEPLOYMENT_TARGET','BLAS','CMAKE_C_FLAGS','CMAKE_CXX_FLAGS')+launcher_keys
  return {'passed':True,'source':'actual main build/CMakeCache.txt','cacheSHA256':sha(path),'values':{key:values.get(key)for key in keys},'scope':'Effective main configuration only; not a successful build or kernel test by itself'}
 
 def collect_cmake_diagnostics(source,output):
  # Only generated CMake diagnostics under two known public build roots. Never
  # collect source trees, an environment dump, home, downloaded archives or keys.
  output.mkdir(parents=True,exist_ok=True)
- files=[];errors=[];total=visited=0;stop=min(DEADLINE,time.monotonic()+3);content_limit=6*1024*1024-65536
- names={'CMakeCache.txt','CMakeConfigureLog.yaml','CMakeError.log','CMakeOutput.log'}
+ files=[];errors=[];total=visited=0;stop=time.monotonic()+3;content_limit=6*1024*1024-65536
+ names={'CMakeCache.txt','CMakeConfigureLog.yaml','CMakeError.log','CMakeOutput.log','.ninja_log'}
  for area in (source/'build',source/'build_host_protoc'):
   if not area.is_dir()or area.is_symlink():continue
   for current,dirs,leaves in os.walk(area,followlinks=False):
@@ -123,12 +134,17 @@ def collect_cmake_diagnostics(source,output):
     limit=min(1024*1024,content_limit-total)
     if limit<=0:break
     size=path.stat().st_size
+    ninja_tail={}
     with path.open('rb')as stream:
-     if size>limit:
+     if name=='.ninja_log':
+      offset=max(0,size-limit);stream.seek(offset);data=stream.read(limit)
+      if offset:data=data.partition(b'\n')[2]
+      ninja_tail={'tailOnly':True,'observedSourceBytes':size,'completeLinesInBoundedTail':data.count(b'\n'),'totalLineCountKnown':False}
+     elif size>limit:
       first=limit//2;data=stream.read(first);stream.seek(max(first,size-(limit-first)));data+=stream.read(limit-first)
      else:data=stream.read(limit)
     target=output/(str(len(files)).zfill(2)+'-'+name+'.txt');target.write_bytes(data);total+=len(data)
-    files.append({'source':path.relative_to(source).as_posix(),'file':target.name,'bytes':len(data),'sha256':sha(target),'truncated':size>len(data)})
+    files.append({'source':path.relative_to(source).as_posix(),'file':target.name,'bytes':len(data),'sha256':sha(target),'truncated':size>len(data),**ninja_tail})
   if time.monotonic()>=stop or visited>5000 or len(files)>=12 or total>=content_limit:break
  result={'files':files,'bytes':total,'fileLimit':12,'aggregateLimitBytes':6*1024*1024,'metadataReserveBytes':65536,'perFileLimitBytes':1024*1024,'directoryVisitLimit':5000,'timeLimitSeconds':3,'errors':errors}
  data=(json.dumps(result,indent=2)+'\n').encode()
@@ -196,6 +212,323 @@ def inspect_wheel(path,architecture,notices):
  if not machos or not licenses:raise ValueError('Native extension or upstream license notices missing')
  return {'filename':path.name,'bytes':path.stat().st_size,'sha256':sha(path),'expandedBytes':expanded,'nativeMachOMembers':records,'licenseNoticeFiles':licenses,'checkpointFiles':checkpoints,'CRCVerified':True}
 
+# Generic build-tool cache only; no application inputs or credentials are cached.
+COMPILER_CACHE_LIMIT=2*1024*1024*1024
+COMPILER_CACHE_MAX_FILES=30000
+COMPILER_CACHE_MANIFEST='cache-snapshot.json'
+COMPILER_CACHE_POLICY='public-cpu-ccache-v1'
+COMPILER_CACHE_FREE_BYTES=10_000_000_000
+COMPILER_CACHE_MARGIN=128*1024*1024
+
+def compiler_cache_digest(path):
+    value = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            value.update(chunk)
+    return value.hexdigest()
+
+def compiler_cache_task_path(name, leaf):
+    temp = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+    path = Path(os.environ[name])
+    if path.absolute() != temp / leaf or path.is_symlink():
+        raise ValueError('Unexpected dedicated path: ' + name)
+    path.resolve().relative_to(temp)
+    return path
+
+def compiler_cache_paths():
+    return (compiler_cache_task_path('CCACHE_DIR', 'public-cpu-ccache-live'),
+            compiler_cache_task_path('CCACHE_SNAPSHOT_DIR', 'public-cpu-ccache-snapshot'),
+            compiler_cache_task_path('CCACHE_CONSUMED_DIR', 'public-cpu-ccache-restored-consumed'))
+
+def compiler_cache_cache_name(name):
+    """Pinned ccache4.14.3: 40hex key distributed over2..4 hex directories."""
+    parts = PurePosixPath(name).parts
+    return (3 <= len(parts) <= 5 and all(re.fullmatch('[0-9a-f]', x) for x in parts[:-1])
+            and re.fullmatch('[0-9a-f]{40}', ''.join(parts)) is not None)
+
+def compiler_cache_selected_files(root, deadline):
+    count = visited = 0
+    for current, directories, files in os.walk(root, followlinks=False):
+        visited += len(directories) + len(files) + 1
+        if visited > 100000 or time.monotonic() >= deadline:
+            raise TimeoutError("Compiler-cache scan bound reached")
+        current = Path(current)
+        for name in list(directories):
+            path = current / name
+            if path.is_symlink():
+                raise ValueError('Cache directory symlink')
+            # Never enter lock/tmp/config/profile directories. No raw object sidecars:
+            # file_clone/hard_link=false makes result entries self-contained.
+            if not re.fullmatch('[0-9a-f]', name) or len(path.relative_to(root).parts) > 4:
+                directories.remove(name)
+        for name in files:
+            path = current / name
+            if path.is_symlink():
+                raise ValueError('Cache file symlink')
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                continue  # Concurrent ccache cleanup may remove an enumerated file.
+            if not stat.S_ISREG(mode):
+                raise ValueError('Special compiler-cache entry')
+            relative = path.relative_to(root).as_posix()
+            if compiler_cache_cache_name(relative):
+                count += 1
+                if count > COMPILER_CACHE_MAX_FILES:
+                    raise ValueError('Compiler-cache file count bound exceeded')
+                yield path, relative
+
+def compiler_cache_signature(value):
+    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_mode, value.st_nlink)
+
+def compiler_cache_stable_copy(source, destination, allowance, deadline, expected=None):
+    """Copy a regular open inode once; discard a changed/replaced input."""
+    if time.monotonic() >= deadline:
+        raise TimeoutError('Cache snapshot/restore time bound reached')
+    before = source.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or source.is_symlink():
+        raise ValueError('Cache source is not a regular file')
+    if before.st_size > allowance:
+        raise ValueError('Compiler cache exceeds2GiB bound')
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
+    descriptor = os.open(source, flags)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    value = hashlib.sha256()
+    try:
+        with os.fdopen(descriptor, 'rb') as original, destination.open('xb') as copied:
+            if compiler_cache_signature(os.fstat(original.fileno())) != compiler_cache_signature(before):
+                raise ValueError('Cache inode changed before opening')
+            while True:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Cache snapshot/restore time bound reached')
+                chunk = original.read(min(1024 * 1024, allowance - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > allowance:
+                    raise ValueError('Compiler cache exceeds2GiB bound')
+                value.update(chunk)
+                copied.write(chunk)
+            after = os.fstat(original.fileno())
+        stable = (compiler_cache_signature(before) == compiler_cache_signature(after) == compiler_cache_signature(source.lstat())
+                  and total == before.st_size)
+        if not stable:
+            destination.unlink()
+            return None
+        record = {'bytes': total, 'sha256': value.hexdigest()}
+        if expected is not None and record != {'bytes': expected['bytes'], 'sha256': expected['sha256']}:
+            raise ValueError('Restored cache content differs from closed manifest')
+        os.chmod(destination, 0o600)
+        return record
+    except BaseException:
+        if destination.exists():
+            destination.unlink()
+        raise
+
+def compiler_cache_snapshot(live, target, key, limit=COMPILER_CACHE_LIMIT, seconds=180):
+    if target.exists() or target.is_symlink() or live.is_symlink():
+        raise ValueError('Snapshot destination already exists or cache is a symlink')
+    deadline = time.monotonic() + seconds
+    target.mkdir()
+    records = []
+    skipped = []
+    total = 0
+    for path, relative in compiler_cache_selected_files(live, deadline):
+        try:
+            row = compiler_cache_stable_copy(path, target / relative, limit - total, deadline)
+        except FileNotFoundError:
+            row = None  # ccache atomic rename/cleanup raced; no partial object saved.
+        if row is None:
+            skipped.append(relative)
+            continue
+        total += row['bytes']
+        records.append({'path': relative, **row})
+    document = {'schema': 1, 'policy': COMPILER_CACHE_POLICY, 'compilerKey': key,
+                'closedSnapshot': True, 'cacheOnly': True, 'fileBytes': total,
+                'files': records, 'skippedUnstableFiles': skipped}
+    encoded = (json.dumps(document, indent=2) + '\n').encode()
+    if total + len(encoded) > limit:
+        raise ValueError('Cache entries plus manifest exceed2GiB')
+    (target / COMPILER_CACHE_MANIFEST).write_bytes(encoded)
+    compiler_cache_validate(target, key, limit, deadline)
+    return {'saveReady': bool(records), 'files': len(records), 'bytesIncludingManifest': total + len(encoded),
+            'skippedUnstableFiles': skipped, 'manifestSHA256': hashlib.sha256(encoded).hexdigest()}
+
+def compiler_cache_validate(root, key, limit=COMPILER_CACHE_LIMIT, deadline=None):
+    deadline = time.monotonic() + 180 if deadline is None else deadline
+    if root.is_symlink():
+        raise ValueError('Snapshot root symlink')
+    metadata = root / COMPILER_CACHE_MANIFEST
+    if metadata.is_symlink() or not metadata.is_file() or metadata.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError('Missing/unbounded cache manifest')
+    document = json.loads(metadata.read_text())
+    if (document.get('schema'), document.get('policy'), document.get('compilerKey'), document.get('closedSnapshot')) != (1, COMPILER_CACHE_POLICY, key, True):
+        raise ValueError('Compiler cache policy/key differs')
+    records = document['files']
+    expected = {}
+    total = metadata.stat().st_size
+    for row in records:
+        if not compiler_cache_cache_name(row['path']) or row['path'] in expected or not isinstance(row['bytes'], int) or row['bytes'] < 0:
+            raise ValueError('Unsafe/duplicate cache manifest entry')
+        expected[row['path']] = row
+        total += row['bytes']
+    if len(expected) > COMPILER_CACHE_MAX_FILES or total > limit:
+        raise ValueError('Restored compiler cache exceeds bound')
+    seen = set()
+    visited = 0
+    for path in root.rglob('*'):
+        visited += 1
+        if visited > 100000 or time.monotonic() >= deadline:
+            raise TimeoutError('Closed compiler-cache verification bound reached')
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError('Snapshot symlink/special entry')
+        if path.is_dir():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative == COMPILER_CACHE_MANIFEST:
+            continue
+        if relative not in expected:
+            raise ValueError('Unexpected cache snapshot file')
+        row = expected[relative]
+        if path.stat().st_size != row['bytes'] or compiler_cache_digest(path) != row['sha256']:
+            raise ValueError('Cache compiler_cache_snapshot file differs')
+        seen.add(relative)
+    if seen != set(expected) or document.get('fileBytes') != total - metadata.stat().st_size:
+        raise ValueError('Cache compiler_cache_snapshot is incomplete')
+    return document
+
+def compiler_cache_restore(live, source, consumed, key):
+    if live.exists() or live.is_symlink() or consumed.exists() or consumed.is_symlink():
+        raise ValueError('Fresh dedicated live/consumed paths required')
+    live.mkdir()
+    if not source.exists():
+        return {'cacheRestored': False, 'files': 0}
+    document = compiler_cache_validate(source, key)
+    deadline = time.monotonic() + 180
+    for row in document['files']:
+        copied = compiler_cache_stable_copy(source / row['path'], live / row['path'], COMPILER_CACHE_LIMIT, deadline, expected=row)
+        if copied is None:
+            raise ValueError('Closed restored cache changed while copying')
+    # Preserve the received snapshot without deleting anything, then free this exact
+    # cache-action path for a new closed snapshot on both build success and failure.
+    source.rename(consumed)
+    return {'cacheRestored': True, 'files': len(document['files'])}
+
+def compiler_cache_public_intel():
+ if os.environ.get('PUBLIC_REPOSITORY')!='true' or os.environ.get('EXPECTED_ARCH')!='x86_64' or platform.system()!='Darwin' or platform.machine()!='x86_64':
+  raise ValueError('Only a confirmed standard public native Intel task may use this compiler cache')
+
+
+def compiler_cache_prepare():
+ global DEADLINE
+ compiler_cache_public_intel();DEADLINE=time.monotonic()+180
+ root=Path(__file__).resolve().parents[1];lock_path=root/'public-lock.json'
+ if sha(lock_path)!=LOCK_SHA256:raise ValueError('Reviewed public lock changed')
+ lock=json.loads(lock_path.read_text());pin=lock['compilerCache']
+ if (pin['name'],pin['version'],pin['sha256'])!=('ccache','4.14.3','764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5'):
+  raise ValueError('Pinned public compiler-cache tool differs')
+ temp=Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+ tools=temp/'public-cpu-cache-tools';tools.mkdir(exist_ok=False)
+ downloads=tools/'downloads';downloads.mkdir();archive=download(pin,downloads)
+ executable=tools/'ccache'
+ with tarfile.open(archive)as package:
+  expected='ccache-4.14.3-darwin/ccache';member=package.getmember(expected)
+  if not member.isfile()or member.size<1 or member.size>32*1024*1024:raise ValueError('Unexpected public ccache archive member')
+  with package.extractfile(member)as source,executable.open('xb')as output:
+   copied=0
+   while True:
+    data=source.read(1024*1024)
+    if not data:break
+    copied+=len(data)
+    if copied>member.size or time.monotonic()>=DEADLINE:raise ValueError('Public compiler tool extraction bound exceeded')
+    output.write(data)
+  if copied!=member.size:raise ValueError('Public compiler tool is truncated')
+ executable.chmod(0o700)
+ # No CI tokens/runtime credentials are forwarded to public build tools.
+ safe_env={key:os.environ[key]for key in ('PATH','HOME','TMPDIR','LANG','LC_ALL','SDKROOT','DEVELOPER_DIR')if key in os.environ}
+ def output(args):return subprocess.check_output(list(map(str,args)),env=safe_env,text=True,timeout=20).strip()
+ compiler=Path(output(['xcrun','--find','clang'])).resolve(strict=True)
+ values={'policy':COMPILER_CACHE_POLICY,'compilerSHA256':sha(compiler),'compilerVersion':output([compiler,'--version']),
+         'sdk':output(['xcrun','--sdk','macosx','--show-sdk-version']),'xcode':output(['xcodebuild','-version']),
+         'ccacheVersion':output([executable,'--version']).splitlines()[0],'publicLockSHA256':LOCK_SHA256,'architecture':'x86_64'}
+ if values['ccacheVersion']!='ccache version 4.14.3':raise ValueError('Actual compiler-cache tool version differs')
+ key=hashlib.sha256(json.dumps(values,sort_keys=True).encode()).hexdigest()
+ live=temp/'public-cpu-ccache-live';snapshot=temp/'public-cpu-ccache-snapshot';consumed=temp/'public-cpu-ccache-restored-consumed'
+ config=temp/'public-cpu-ccache.conf';temporary=temp/'public-cpu-ccache-tmp'
+ for path in (live,snapshot,consumed,config,temporary):
+  if path.exists()or path.is_symlink():raise ValueError('Fresh compiler-cache task paths required')
+ temporary.mkdir()
+ config.write_text('cache_dir = '+str(live)+'\ntemporary_dir = '+str(temporary)+
+                   '\nmax_size = 1800Mi\nmax_files = 25000\ncompression = true\ndirect_mode = false\ncompiler_check = content\n'
+                   'hash_dir = true\nfile_clone = false\nhard_link = false\nremote_storage =\nsloppiness =\nnamespace = public-pinned-cpu\n')
+ env={'CCACHE_DIR':str(live),'CCACHE_SNAPSHOT_DIR':str(snapshot),'CCACHE_CONSUMED_DIR':str(consumed),
+      'CCACHE_CONFIGPATH':str(config),'CCACHE_TEMPDIR':str(temporary),'CCACHE_EXE':str(executable),'CCACHE_COMPILER_KEY':key}
+ for language in ('C','CXX','OBJC','OBJCXX'):env['CMAKE_'+language+'_COMPILER_LAUNCHER']=str(executable)
+ with open(os.environ['GITHUB_ENV'],'a')as stream:
+  for name,value in env.items():stream.write(name+'='+value+'\n')
+ with open(os.environ['GITHUB_OUTPUT'],'a')as stream:stream.write('compiler-key='+key+'\n')
+ return {'compilerKey':key,'inputs':values,'maxSnapshotBytes':COMPILER_CACHE_LIMIT,'liveCleanupTargetMiB':1800,'toolSHA256':sha(executable)}
+
+
+def compiler_cache_admission(usage,repository):
+ if not isinstance(usage,dict)or usage.get('full_name')!=repository:raise ValueError('Cache-usage repository differs')
+ used=usage.get('active_caches_size_in_bytes');count=usage.get('active_caches_count')
+ if type(used)is not int or type(count)is not int or used<0 or count<0:raise ValueError('Actual repository cache usage is missing/invalid')
+ return {'admitted':used+COMPILER_CACHE_LIMIT+COMPILER_CACHE_MARGIN<=COMPILER_CACHE_FREE_BYTES,
+         'repository':repository,'activeCacheBytes':used,'activeCacheCount':count,'newSnapshotReserveBytes':COMPILER_CACHE_LIMIT,
+         'archiveAndConcurrencyMarginBytes':COMPILER_CACHE_MARGIN,'conservativeFreeCeilingBytes':COMPILER_CACHE_FREE_BYTES,
+         'projectedReservedBytes':used+COMPILER_CACHE_LIMIT+COMPILER_CACHE_MARGIN,'cacheLimitChanged':False,'paidUseAuthorized':False}
+
+
+class CompilerCacheNoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,request,fp,code,msg,headers,newurl):
+  raise ValueError('Cache-usage redirects are refused; token is never forwarded')
+
+
+def compiler_cache_admit():
+ # This is the only mode that reads the ephemeral same-repository CI read token.
+ # It never runs a subprocess or sends the token to public source/build services.
+ result={'admitted':False,'actualUsageRead':False,'cacheLimitChanged':False,'paidUseAuthorized':False}
+ try:
+  compiler_cache_public_intel()
+  repository=os.environ['GITHUB_REPOSITORY']
+  if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repository):raise ValueError('Invalid same-repository identity')
+  event=json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+  info=event.get('repository',{})
+  if info.get('full_name')!=repository or info.get('visibility')!='public' or info.get('private')is not False:
+   raise ValueError('Confirmed same public repository is required')
+  token=os.environ.get('GH_CACHE_READ_TOKEN')
+  if not token:raise ValueError('Same-repository CI read token unavailable')
+  _,snapshot,_=compiler_cache_paths();compiler_cache_validate(snapshot,os.environ['CCACHE_COMPILER_KEY'])
+  url='https://api.github.com/repos/'+repository+'/actions/cache/usage'
+  request=urllib.request.Request(url,headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json',
+                                            'X-GitHub-Api-Version':'2026-03-10','User-Agent':'public-compiler-cache-admission'})
+  opener=urllib.request.build_opener(CompilerCacheNoRedirect())
+  with opener.open(request,timeout=20)as response:
+   if response.status!=200 or response.geturl()!=url:raise ValueError('Unexpected cache-usage response')
+   data=response.read(65537)
+   if len(data)>65536:raise ValueError('Unbounded cache-usage response')
+  result=compiler_cache_admission(json.loads(data),repository);result['actualUsageRead']=True
+ except Exception as error:
+  # Deliberately record only the type: never request/header/token/error-body data.
+  result['failureType']=type(error).__name__
+ finally:
+  with open(os.environ['GITHUB_OUTPUT'],'a')as stream:stream.write('save-admitted='+str(result['admitted']).lower()+'\n')
+ return result
+
+
+def compiler_cache_cli(mode):
+ if mode=='prepare':result=compiler_cache_prepare()
+ elif mode=='admit':result=compiler_cache_admit()
+ else:
+  compiler_cache_public_intel();live,target,consumed=compiler_cache_paths();key=os.environ['CCACHE_COMPILER_KEY']
+  if mode=='restore':result=compiler_cache_restore(live,target,consumed,key)
+  else:
+   result=compiler_cache_snapshot(live,target,key)
+   with open(os.environ['GITHUB_OUTPUT'],'a')as stream:stream.write('save-ready='+str(result['saveReady']).lower()+'\n')
+ print(json.dumps(result,indent=2));return 0
+
 def main():
  global DEADLINE
  argparse.ArgumentParser().parse_args();started=time.monotonic();DEADLINE=started+MAX_SECONDS
@@ -237,7 +570,7 @@ def main():
     build_env=cpu_build_environment(env,pin['version'],arch)
     wheel_dir=work/(name+'-built');wheel_dir.mkdir()
     try:
-     run([python,'-I','-m','pip','wheel','--no-index','--no-deps','--no-build-isolation','--no-cache-dir','--wheel-dir',wheel_dir,source],dest/'build.log',build_env,150*60)
+     run([python,'-I','-m','pip','wheel','--no-index','--no-deps','--no-build-isolation','--no-cache-dir','--wheel-dir',wheel_dir,source],dest/'build.log',build_env,(270 if name=='torch' else 30)*60)
     except Exception:
      try:record['cmakeDiagnostics']=collect_cmake_diagnostics(source,dest/'cmake-diagnostics')
      except Exception as diagnostic_error:record['cmakeDiagnosticError']=str(diagnostic_error)
@@ -269,4 +602,8 @@ def main():
    with open(os.environ['GITHUB_STEP_SUMMARY'],'a')as stream:stream.write('* Public CPU dependency experiment: '+('passed'if report['passed']else'failed/incomplete')+'; no application compatibility or model inference claim.\n')
  return 0 if report['passed']else 1
 
-if __name__=='__main__':raise SystemExit(main())
+if __name__=='__main__':
+ if len(sys.argv)>1 and sys.argv[1]=='--compiler-cache':
+  parser=argparse.ArgumentParser();parser.add_argument('--compiler-cache',choices=('prepare','restore','snapshot','admit'),required=True)
+  raise SystemExit(compiler_cache_cli(parser.parse_args().compiler_cache))
+ raise SystemExit(main())

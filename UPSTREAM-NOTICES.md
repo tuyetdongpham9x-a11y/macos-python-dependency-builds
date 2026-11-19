@@ -9,3 +9,5 @@ The recipe downloads upstream bytes at the exact commits or SHA-256 hashes in `p
 - NumPy, Pillow, setuptools, wheel, Cython and the other explicitly pinned bootstrap packages retain their respective upstream licenses. They are temporary build/probe inputs. Public library-wheel license notices are retained when sharing generated or official library wheels.
 
 The MIT license in this repository does not relicense third-party dependencies. A checksum identifies bytes; it does not establish a successful native build or compatibility. The actual CPU ABI report is separate from the checksum report.
+
+- [ccache4.14.3 source and GPL-3.0-or-later license](https://github.com/ccache/ccache/blob/v4.14.3/GPL-3.0.txt). The hash-pinned public Darwin build tool is temporary and is not redistributed in the wheel/evidence artifact. Its compiler-cache output contains only the public dependency compilation entries described in the recipe.

@@ -418,5 +418,13 @@
     "artifactEvidenceLimitBytes": 20971520,
     "artifactWheelModeAggregateLimitBytes": 268435456,
     "toolchainImagesAreMoving": "Runner Clang/Xcode/SDK versions must be recorded; bit-identical builds are not claimed."
+  },
+  "compilerCache": {
+    "name": "ccache",
+    "version": "4.14.3",
+    "filename": "ccache-4.14.3-darwin.tar.gz",
+    "url": "https://github.com/ccache/ccache/releases/download/v4.14.3/ccache-4.14.3-darwin.tar.gz",
+    "sha256": "764dd2a8100ff83e6bbd7b9a1e2016cc401be34bee8a70ea99698186622c34d5",
+    "maxBytes": 33554432
   }
 }
