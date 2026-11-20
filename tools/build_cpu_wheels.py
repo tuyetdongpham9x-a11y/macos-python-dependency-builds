@@ -461,7 +461,7 @@ def compiler_cache_prepare():
  temporary.mkdir()
  config.write_text('cache_dir = '+str(live)+'\ntemporary_dir = '+str(temporary)+
                    '\nmax_size = 1800Mi\nmax_files = 25000\ncompression = true\ndirect_mode = false\ncompiler_check = content\n'
-                   'hash_dir = true\nfile_clone = false\nhard_link = false\nremote_storage =\nsloppiness =\nnamespace = public-pinned-cpu\n')
+                   'hash_dir = true\nfile_clone = false\nhard_link = false\nnamespace = public-pinned-cpu\n')
  env={'CCACHE_DIR':str(live),'CCACHE_SNAPSHOT_DIR':str(snapshot),'CCACHE_CONSUMED_DIR':str(consumed),
       'CCACHE_CONFIGPATH':str(config),'CCACHE_TEMPDIR':str(temporary),'CCACHE_EXE':str(executable),'CCACHE_COMPILER_KEY':key}
  for language in ('C','CXX','OBJC','OBJCXX'):env['CMAKE_'+language+'_COMPILER_LAUNCHER']=str(executable)
@@ -518,9 +518,44 @@ def compiler_cache_admit():
  return result
 
 
+def compiler_cache_smoke():
+ # Keep every inherited CI token and unreviewed CCACHE_* override out of tools.
+ compiler_cache_public_intel()
+ temp=Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+ executable=Path(os.environ['CCACHE_EXE'])
+ if executable.is_symlink()or executable.absolute()!=temp/'public-cpu-cache-tools/ccache':raise ValueError('Unexpected compiler-cache executable')
+ compiler_cache_task_path('CCACHE_CONFIGPATH','public-cpu-ccache.conf')
+ work=temp/'public-cpu-cache-smoke'
+ if work.exists()or work.is_symlink():raise ValueError('Fresh compiler-cache smoke directory required')
+ work.mkdir()
+ env=native_environment(work,temp/'public-cpu-work/python/python')
+ defaults={}
+ for key in('remote_storage','sloppiness'):
+  value=subprocess.check_output([str(executable),'--get-config',key],env=env,stderr=subprocess.PIPE,text=True,timeout=20)
+  if value.strip():raise ValueError('Effective compiler-cache '+key+' must be empty')
+  defaults[key]=True
+ compiler=Path(subprocess.check_output(['xcrun','--find','clang++'],env=env,stderr=subprocess.PIPE,text=True,timeout=20).strip()).resolve(strict=True)
+ source=work/'compiler-cache-probe.cpp';target=work/'compiler-cache-probe.o'
+ source.write_text('int compiler_cache_probe(){return 42;}\n',encoding='utf-8')
+ result=subprocess.run([str(executable),str(compiler),'-std=c++17','-c',str(source),'-o',str(target)],env=env,
+                       stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=60,check=False)
+ output=result.stdout[:65536]
+ evidence=temp/'public-cpu-evidence';evidence.mkdir(exist_ok=True)
+ (evidence/'compiler-cache-smoke-compile.log').write_bytes(output)
+ if result.returncode:raise ValueError('Compiler-cache C++ object preflight failed; see bounded compile log')
+ if target.is_symlink()or not target.is_file()or target.stat().st_size<1:raise ValueError('Compiler-cache preflight did not produce an object')
+ with target.open('rb')as stream:architectures=macho_arches(stream.read(1024))
+ if architectures!=['x86_64']:raise ValueError('Compiler-cache preflight object architecture differs')
+ return {'effectiveRemoteStorageEmpty':defaults['remote_storage'],'effectiveSloppinessEmpty':defaults['sloppiness'],
+         'filteredEnvironmentUsed':True,'tinyCXXObjectCompiled':True,'objectBytes':target.stat().st_size,
+         'objectSHA256':sha(target),'objectArchitectures':architectures,'compileOutputTruncated':len(result.stdout)>65536,
+         'applicationCompatibilityProven':False}
+
+
 def compiler_cache_cli(mode):
  if mode=='prepare':result=compiler_cache_prepare()
  elif mode=='admit':result=compiler_cache_admit()
+ elif mode=='smoke':result=compiler_cache_smoke()
  else:
   compiler_cache_public_intel();live,target,consumed=compiler_cache_paths();key=os.environ['CCACHE_COMPILER_KEY']
   if mode=='restore':result=compiler_cache_restore(live,target,consumed,key)
@@ -604,6 +639,6 @@ def main():
 
 if __name__=='__main__':
  if len(sys.argv)>1 and sys.argv[1]=='--compiler-cache':
-  parser=argparse.ArgumentParser();parser.add_argument('--compiler-cache',choices=('prepare','restore','snapshot','admit'),required=True)
+  parser=argparse.ArgumentParser();parser.add_argument('--compiler-cache',choices=('prepare','restore','snapshot','smoke','admit'),required=True)
   raise SystemExit(compiler_cache_cli(parser.parse_args().compiler_cache))
  raise SystemExit(main())

@@ -6,7 +6,7 @@ The candidate retains exactly seven generic public recipe files. It accepts no a
 
 ## Proposed execution boundary
 
-The workflow is fixed to standard public `macos-15-intel`. One exact-path push is accepted only on `ci/intel-cpu-cache-20261120-01`, in the verified public repository ID1464218824, with `event.before` exactly `2800135a32db0a81b751545c948b654d03b24ffa`. Manual dispatch is optional on that same branch. Root must review terminal prior evidence, this exact source/privacy payload and actual free cache/artifact capacity before publishing or running it. No larger, GPU, paid or self-hosted runner is selected.
+The workflow is fixed to standard public `macos-15-intel`. One exact-path push is accepted only on `ci/intel-cpu-cache-20261120-01`, in the verified public repository ID1464218824, with `event.before` exactly `d4abe27585058218890c4b1c1285805013b1529f`. Manual dispatch is optional on that same branch. Root must review terminal prior evidence, this exact source/privacy payload and actual free cache/artifact capacity before publishing or running it. No larger, GPU, paid or self-hosted runner is selected.
 
 The proposed whole job is capped at300 minutes, the controller at280 minutes and an individual Torch source build at270 minutes. TorchVision and the final checks share the remaining controller budget. Two build workers and the existing macOS15/thin Intel target remain. The lower controller cap leaves a nominal20-minute whole-job margin for checkpoint/evidence work. Setup/restore consumes part of that margin and network upload time is not guaranteed; hard runner cancellation can still prevent saving. These caps do not promise successful compilation. The shared Intel concurrency group does not cancel an active job and serializes this recipe's cache writer. Pushes select bounded wheel sharing; manual dispatch retains the chosen artifact mode.
 
@@ -41,3 +41,11 @@ See [UPSTREAM-NOTICES.md](UPSTREAM-NOTICES.md) for original licenses. The recipe
 On build failure, the existing bounded diagnostic collector also samples `.ninja_log` under its two known public build roots. Each sample is a tail of at most1MiB, with a bounded-tail complete-line count and no claim to know the full record count. The existing12-file/6MiB/3-second scan limits remain unchanged. This dedicated diagnostic-only three-second reserve can run after the compile controller deadline, within the whole-job cap. This is partial build-progress evidence, not a successful compiler or wheel result.
 
 Task paths remain deterministic relative to RUNNER_TEMP. Actual observed Intel jobs used `/Users/runner/work/_temp`, but that prefix is not guaranteed by this recipe. With normal ccache source/options/path checks, changed paths or toolchain keys can cause honest misses; no unsafe hash relaxation or compiler prefix-map is introduced.
+
+## Empty-default config correction and pre-clone compiler check
+
+The first cache-enabled native attempt failed inside CMake try-compile with `ccache: error: URL scheme must not be empty: sloppiness`. In pinned ccache4.14.3, the config reader can advance past the newline of an explicitly empty assignment. This recipe therefore omits `remote_storage` and `sloppiness`; both pinned upstream defaults are empty. No tool/source/version or CPU component is changed.
+
+Before cloning upstream source, the closed-restore step invokes the actual pinned executable with `--get-config remote_storage` and `--get-config sloppiness` in the existing filtered child environment. Both effective values must be empty. Raw configuration values are never printed, and inherited CCACHE remote/sloppiness overrides and CI tokens are not forwarded. The same filtered environment must compile a tiny C++ object through the pinned ccache wrapper and produce a nonempty native Intel object. Its bounded compiler log and receipt describe only this build-tool check, not PyTorch or application compatibility.
+
+Primary source: [pinned config defaults](https://github.com/ccache/ccache/blob/v4.14.3/src/ccache/config.hpp), [pinned config reader](https://github.com/ccache/ccache/blob/v4.14.3/src/ccache/util/configreader.cpp).

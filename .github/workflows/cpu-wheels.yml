@@ -1,5 +1,5 @@
-# Enabling candidate: root alone may publish after exact source/privacy/quota review.
-# Initial push requires exact branch, repository ID and verified event.before base; no active cancellation.
+# Config-default correction: root alone may publish after exact source/privacy/quota review.
+# Same noncanceling public Intel scope; exact prior head is required for the next push.
 name: Public Intel CPU compiler checkpoints
 'on':
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
   cpu-wheels:
     if: ${{ github.event.repository.id == 1464218824 && github.event.repository.visibility == 'public' && github.event.repository.private == false && github.ref
       == 'refs/heads/ci/intel-cpu-cache-20261120-01' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.before
-      == '2800135a32db0a81b751545c948b654d03b24ffa')) }}
+      == 'd4abe27585058218890c4b1c1285805013b1529f')) }}
     runs-on: macos-15-intel
     timeout-minutes: 300
     env:
@@ -75,6 +75,7 @@ jobs:
         set -euo pipefail
         python3 tools/build_cpu_wheels.py --compiler-cache restore | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-restore.json"
         "$CCACHE_EXE" --cleanup > "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-cleanup.log" 2>&1
+        python3 tools/build_cpu_wheels.py --compiler-cache smoke | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-smoke.json"
     - name: Build or probe pinned public CPU libraries
       run: |
         set -euo pipefail
