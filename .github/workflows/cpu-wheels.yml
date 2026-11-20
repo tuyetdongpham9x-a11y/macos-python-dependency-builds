@@ -1,22 +1,9 @@
-# Config-default correction: root alone may publish after exact source/privacy/quota review.
-# Same noncanceling public Intel scope; exact prior head is required for the next push.
-name: Public Intel CPU compiler checkpoints
-'on':
+name: Public Intel relocated library smoke
+on:
   workflow_dispatch:
-    inputs:
-      artifact_mode:
-        description: Default20MiB text evidence; optional256MiB aggregate wheel sharing
-        type: choice
-        options:
-        - none
-        - evidence
-        - wheels
-        default: evidence
   push:
-    branches:
-    - ci/intel-cpu-cache-20261120-01
-    paths:
-    - .github/workflows/cpu-wheels.yml
+    branches: [ci/intel-relocation-smoke-20261120-01]
+    paths: [.github/workflows/cpu-wheels.yml]
 permissions:
   contents: read
   actions: read
@@ -24,146 +11,150 @@ concurrency:
   group: public-cpu-wheels-x86_64
   cancel-in-progress: false
 jobs:
-  cpu-wheels:
-    if: ${{ github.event.repository.id == 1464218824 && github.event.repository.visibility == 'public' && github.event.repository.private == false && github.ref
-      == 'refs/heads/ci/intel-cpu-cache-20261120-01' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.before
-      == 'd4abe27585058218890c4b1c1285805013b1529f')) }}
+  relocation:
+    if: ${{ github.event.repository.id == 1464218824 && github.event.repository.visibility == 'public' && github.event.repository.private == false && github.ref == 'refs/heads/ci/intel-relocation-smoke-20261120-01' && (github.event_name == 'workflow_dispatch' || github.event.before == 'daa7526da741121e8198f0b999f4150ef0e99f7f') }}
     runs-on: macos-15-intel
-    timeout-minutes: 300
-    env:
-      PUBLIC_REPOSITORY: ${{ github.event.repository.visibility == 'public' && github.event.repository.private == false }}
-      EXPECTED_ARCH: x86_64
-      ARTIFACT_MODE: ${{ github.event_name == 'push' && 'wheels' || inputs.artifact_mode || 'evidence' }}
+    timeout-minutes: 10
     steps:
-    - name: Check out this public recipe only
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        ref: ${{ github.sha }}
-        fetch-depth: 1
         persist-credentials: false
         submodules: false
         lfs: false
-    - name: Check native standard runner
-      run: |
-        set -euo pipefail
-        umask 077
-        ulimit -c 0
-        test "$PUBLIC_REPOSITORY" = true
-        test "$(uname -m)" = "$EXPECTED_ARCH"
-        translated=$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)
-        test "$translated" != 1
-        hardware_arm=$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)
-        if test "$EXPECTED_ARCH" = x86_64 && test "$hardware_arm" = 1; then exit 1; fi
-        mkdir -p "$RUNNER_TEMP/public-cpu-evidence"
-    - name: Prepare pinned public compiler cache and actual toolchain key
-      id: cache-key
-      run: |
-        set -euo pipefail
-        umask 077
-        python3 tools/build_cpu_wheels.py --compiler-cache prepare | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-tool.json"
-    - name: Restore only matching public compiler entries in normal branch scope
-      id: compiler-cache
-      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-      with:
-        path: ${{ runner.temp }}/public-cpu-ccache-snapshot
-        key: public-cpu-ccache-v1-x86_64-${{ steps.cache-key.outputs.compiler-key }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          public-cpu-ccache-v1-x86_64-${{ steps.cache-key.outputs.compiler-key }}-
-    - name: Verify closed restore and load a separate writable cache
-      id: cache-load
-      run: |
-        set -euo pipefail
-        python3 tools/build_cpu_wheels.py --compiler-cache restore | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-restore.json"
-        "$CCACHE_EXE" --cleanup > "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-cleanup.log" 2>&1
-        python3 tools/build_cpu_wheels.py --compiler-cache smoke | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-smoke.json"
-    - name: Build or probe pinned public CPU libraries
-      run: |
-        set -euo pipefail
-        umask 077
-        ulimit -c 0
-        python3 tools/build_cpu_wheels.py
-      id: cpu-build
-    - name: Record compiler cache statistics after controller success or failure
-      if: ${{ always() && steps.cache-load.outcome == 'success' }}
-      run: |
-        set -euo pipefail
-        "$CCACHE_EXE" --show-stats > "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-stats.txt" 2>&1
-    - name: Close completed object entries into a bounded independent snapshot
-      id: cache-snapshot
-      if: ${{ always() && steps.cache-load.outcome == 'success' }}
-      run: |
-        set -euo pipefail
-        python3 tools/build_cpu_wheels.py --compiler-cache snapshot | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-snapshot.json"
-    - name: Read actual same-repository cache usage immediately before save
-      id: cache-admission
-      if: ${{ always() && steps.cache-snapshot.outputs.save-ready == 'true' }}
+        fetch-depth: 1
+    - name: Reuse exact public wheels, repair two loader paths and relocate
       env:
-        GH_CACHE_READ_TOKEN: ${{ github.token }}
+        ARTIFACT_READ_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        python3 tools/build_cpu_wheels.py --compiler-cache admit | tee "$RUNNER_TEMP/public-cpu-evidence/compiler-cache-admission.json"
-    - name: Save only an admitted closed public compiler snapshot
-      if: ${{ always() && steps.cache-snapshot.outputs.save-ready == 'true' && steps.cache-admission.outputs.save-admitted == 'true' }}
-      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-      with:
-        path: ${{ runner.temp }}/public-cpu-ccache-snapshot
-        key: public-cpu-ccache-v1-x86_64-${{ steps.cache-key.outputs.compiler-key }}-${{ github.run_id }}-${{ github.run_attempt }}
-    - name: Freeze capped shareable artifacts
-      id: artifact-budget
-      if: ${{ always() && inputs.artifact_mode != 'none' }}
-      run: |
-        set -euo pipefail
-        python3 - <<'PY'
-        import json,os,stat
+        umask 077
+        ulimit -c 0
+        python3 -B - <<'PY'
+        import hashlib,importlib.util,json,os,platform,shutil,subprocess,sys,tarfile,time,urllib.error,urllib.parse,urllib.request,zipfile
         from pathlib import Path
-        ok=False
+        root=Path.cwd();temp=Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
+        work=temp/'public-intel-relocation';out=temp/'public-intel-relocation-evidence'
+        work.mkdir();out.mkdir();deadline=time.monotonic()+480
+        report={'schema':1,'passed':False,'architecture':'x86_64','sourceBuiltInThisRun':False,'reusedRunId':44644856901,'artifactId':14601025934,'controllerSeconds':480,'applicationCompatibilityProven':False,'modelInferenceVerified':False,'gpuOperationsPerformed':False}
+        sha=lambda p:hashlib.file_digest(Path(p).open('rb'),'sha256').hexdigest()
+        def save(p,v):p.write_text(json.dumps(v,indent=2)+'\n')
         try:
-            temp=Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
-            evidence=temp/'public-cpu-evidence'
-            wheels=temp/'public-cpu-wheels'
-            target=temp/'public-cpu-artifacts'
-            mode=os.environ['ARTIFACT_MODE']
-            if mode not in ('evidence','wheels'): raise ValueError('Unexpected artifact mode')
-            report_path=evidence/'build-report.json'
-            report=json.loads(report_path.read_text()) if report_path.is_file() else {}
-            share_wheels=(mode=='wheels' and report.get('passed') is True and report.get('CPUABIProbePassed') is True and len(report.get('wheels',[]))==2)
-            limit=(256 if share_wheels else 20)*1024*1024
-            if target.exists() or target.is_symlink(): raise ValueError('Snapshot already exists')
-            target.mkdir()
-            roots=[(evidence,'evidence')]+([(wheels,'wheels')] if share_wheels else [])
-            total=count=0
-            for root,prefix in roots:
-                if root.is_symlink(): raise ValueError('Artifact source symlink')
-                root.resolve(strict=True).relative_to(temp)
-                for path in sorted(root.rglob('*')):
-                    value=path.lstat()
-                    if path.is_symlink(): raise ValueError('Artifact symlink')
-                    if stat.S_ISDIR(value.st_mode): continue
-                    if not stat.S_ISREG(value.st_mode): raise ValueError('Artifact special file')
-                    if prefix=='wheels' and path.suffix!='.whl': raise ValueError('Only library wheels can be shared')
-                    if prefix=='evidence' and path.suffix.lower() not in ('.txt','.json','.log','.md') and not path.name.upper().startswith(('LICENSE','COPYING','NOTICE')):
-                        raise ValueError('Only text evidence and original license notices can be shared')
-                    destination=target/prefix/path.relative_to(root)
-                    destination.parent.mkdir(parents=True,exist_ok=True)
-                    with path.open('rb') as source,destination.open('xb') as copied:
-                        while True:
-                            data=source.read(min(1024*1024,limit-total+1))
-                            if not data: break
-                            total+=len(data)
-                            if total>limit: raise ValueError('Aggregate public artifact cap exceeded; nothing uploaded')
-                            copied.write(data)
-                    count+=1
-            print(json.dumps({'files':count,'bytes':total,'aggregateLimitBytes':limit,'closedSnapshot':True,'mode':mode,'wheelsShared':share_wheels}))
-            ok=True
+          if platform.system()!='Darwin' or platform.machine()!='x86_64':raise ValueError('Native Intel macOS required')
+          safe={k:os.environ[k] for k in ('PATH','TMPDIR','LANG','LC_ALL','SDKROOT','DEVELOPER_DIR') if k in os.environ}
+          (work/'home').mkdir();safe.update(HOME=str(work/'home'),PYTHONDONTWRITEBYTECODE='1',PYTHONNOUSERSITE='1',PIP_CONFIG_FILE='/dev/null',PIP_NO_INDEX='1',PIP_NO_CACHE_DIR='1')
+          cpu=subprocess.check_output(['/usr/sbin/sysctl','-n','hw.cputype'],env=safe,timeout=10,text=True).strip()
+          if cpu!='7':raise ValueError('Actual Intel CPU hardware required')
+          pins={'tools/build_cpu_wheels.py':'736d8ee75653061d92184c66fa800a878728b3482dad9c4da69077fe598a8597','tools/probe_cpu.py':'ea27184e7966c47874962515e46166e61ba4e841e9202639b4df1dba57fce3c0','public-lock.json':'fe5b8aebd65943bbcca3b80cce97a7ab72218a493882efc2f7d68b69c977d932'}
+          if any(sha(root/p)!=h for p,h in pins.items()):raise ValueError('Reviewed public recipe changed')
+          spec=importlib.util.spec_from_file_location('public_helpers',root/'tools/build_cpu_wheels.py');helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper);helper.DEADLINE=deadline
+          token=os.environ.pop('ARTIFACT_READ_TOKEN')
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self,*args,**kwargs):return None
+          api='https://api.github.com/repos/tuyetdongpham9x-a11y/macos-python-dependency-builds/actions/artifacts/14601025934/zip'
+          request=urllib.request.Request(api,headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2026-03-10','User-Agent':'public-library-relocation-smoke'})
+          try:
+            urllib.request.build_opener(NoRedirect()).open(request,timeout=30)
+            raise ValueError('Expected normal artifact download redirect')
+          except urllib.error.HTTPError as error:
+            if error.code!=302:raise ValueError('Artifact download unavailable') from None
+            location=error.headers.get('Location','')
+          del token,request
+          target=urllib.parse.urlsplit(location)
+          if target.scheme!='https' or target.username or target.password or not target.hostname or not target.hostname.endswith(('.blob.core.windows.net','.actions.githubusercontent.com','.githubusercontent.com')):raise ValueError('Unexpected artifact storage redirect')
+          artifact=work/'public-wheels.zip';digest=hashlib.sha256();total=0
+          with urllib.request.urlopen(location,timeout=60) as source,artifact.open('xb') as dest:
+            while True:
+              if time.monotonic()>=deadline:raise TimeoutError('Artifact transfer deadline')
+              block=source.read(1024*1024)
+              if not block:break
+              total+=len(block)
+              if total>98636301:raise ValueError('Artifact exceeds exact size')
+              digest.update(block);dest.write(block)
+          del location
+          if total!=98636301 or digest.hexdigest()!='c6e05d9faa6d1b9b77f2413ff13f07d56fa3213e2623ddc8ddfcc6eea2793698':raise ValueError('Complete artifact digest differs')
+          expected={'torch-2.13.0-cp311-cp311-macosx_15_0_x86_64.whl':(100035525,'ccd3fa5094bd15bfc40cc7863a7652bcaa24d8e1e85bafec51f02a7c0b96f37a'),'torchvision-0.28.0-cp311-cp311-macosx_15_0_x86_64.whl':(862951,'bd8aea601f93aa91bfcce9e0427c4672cf4e25e8eaab7e29f21021d454d99169')}
+          wheels=[]
+          with zipfile.ZipFile(artifact) as archive:
+            if archive.testzip() is not None:raise ValueError('Artifact CRC failed')
+            for name,(size,h) in expected.items():
+              entry=archive.getinfo('wheels/'+name)
+              if entry.file_size!=size:raise ValueError('Wheel size differs')
+              wheel=work/name
+              with archive.open(entry) as source,wheel.open('xb') as dest:shutil.copyfileobj(source,dest,1024*1024)
+              if sha(wheel)!=h:raise ValueError('Wheel digest differs')
+              helper.inspect_wheel(wheel,'x86_64',out/'notices');wheels.append(wheel)
+          downloads=work/'downloads';downloads.mkdir();lock=json.loads((root/'public-lock.json').read_bytes());selected=lock['architectures']['x86_64']
+          python_archive=helper.download(selected['python'],downloads);area=work/'initial';area.mkdir()
+          with tarfile.open(python_archive) as archive:archive.extractall(area,filter='data')
+          children=list(area.iterdir())
+          if len(children)!=1 or not children[0].is_dir():raise ValueError('Unexpected public Python layout')
+          prefix=children[0];python=prefix/'bin/python3.11'
+          wanted={'filelock','fsspec','jinja2','markupsafe','mpmath','networkx','numpy','pillow','sympy','typing-extensions'}
+          entries=[e for e in selected['bootstrapWheels'] if e['name'] in wanted]
+          if {e['name'] for e in entries}!=wanted:raise ValueError('Exact ordinary runtime dependency set differs')
+          deps=[helper.download(e,downloads) for e in entries]
+          env=dict(safe,PATH=str(prefix/'bin')+os.pathsep+safe.get('PATH',''),DYLD_FALLBACK_LIBRARY_PATH=str(prefix/'lib')+':/usr/lib',ATEN_CPU_CAPABILITY='default')
+          helper.run([python,'-I','-B','-m','pip','install','--no-index','--no-deps','--no-cache-dir',*deps,*wheels],out/'install.log',env,180)
+          helper.run([python,'-I','-B','-m','pip','check'],out/'pip-check.log',env,30)
+          site=prefix/'lib/python3.11/site-packages';edits=[]
+          for leaf in ('_C.so','image.so'):
+            image=site/'torchvision'/leaf;before=sha(image)
+            original_hashes={'_C.so':'d08405a501c57c32ea1134c310959fd8dce4ca7980fb277ee1cf6d85686f16f4','image.so':'077a6593f2e8d96c244f52edc7d9daf09c50da6ff1eefeb8daeb969e075e9c57'}
+            if before!=original_hashes[leaf]:raise ValueError('Installed Vision image differs from exact reviewed wheel bytes')
+            original=helper.run(['/usr/bin/otool','-l',image],out/(leaf+'-before.log'),safe,15)
+            if 'LC_RPATH' in original:raise ValueError('Unexpected existing Vision rpath')
+            helper.run(['/usr/bin/install_name_tool','-add_rpath','@loader_path/../torch/lib',image],out/(leaf+'-edit.log'),safe,15)
+            helper.run(['/usr/bin/codesign','--force','--sign','-',image],out/(leaf+'-sign.log'),safe,15)
+            helper.run(['/usr/bin/codesign','--verify','--strict',image],out/(leaf+'-verify.log'),safe,15)
+            after=helper.run(['/usr/bin/otool','-l',image],out/(leaf+'-after.log'),safe,15)
+            if after.count('LC_RPATH')!=1 or after.count('path @loader_path/../torch/lib (offset ')!=1:raise ValueError('Exact Vision loader path missing')
+            edits.append({'path':'torchvision/'+leaf,'beforeSHA256':before,'afterSHA256':sha(image),'addedRPath':'@loader_path/../torch/lib','adhocSealVerified':True})
+          relocated=work/'relocated-python'
+          prefix.resolve(strict=True).relative_to(work)
+          if relocated.exists():raise ValueError('Relocation target must be fresh')
+          prefix.rename(relocated)
+          if prefix.exists():raise ValueError('Original prefix remains available')
+          env.update(PATH=str(relocated/'bin')+os.pathsep+safe.get('PATH',''),DYLD_FALLBACK_LIBRARY_PATH=str(relocated/'lib')+':/usr/lib')
+          helper.run([relocated/'bin/python3.11','-I','-B',root/'tools/probe_cpu.py','--architecture','x86_64','--output',out/'relocated-cpu-probe.json'],out/'relocated-cpu-probe.log',env,120)
+          code="import json,sys;from pathlib import Path;import numpy,torch,torchvision;root=Path(sys.prefix).resolve();paths=[Path(m.__file__).resolve() for m in (numpy,torch,torchvision)];assert all(p.is_relative_to(root) for p in paths);image=root/'lib/python3.11/site-packages/torchvision/image.so';torch.ops.load_library(str(image));assert str(image.resolve()) in {str(Path(p).resolve()) for p in torch.ops.loaded_libraries};print(json.dumps({'passed':True,'prefix':str(root),'modulePaths':list(map(str,paths)),'imageLibraryLoaded':True,'pngJpegCodecOperationsTested':False}))"
+          image=helper.run([relocated/'bin/python3.11','-I','-B','-c',code],out/'relocated-image-load.json',env,60)
+          image=json.loads(image);probe=json.loads((out/'relocated-cpu-probe.json').read_bytes())
+          if probe.get('passed') is not True or image.get('passed') is not True:raise ValueError('Actual relocated library probe failed')
+          report.update(passed=True,completeArtifactSHA256=digest.hexdigest(),exactLinkEdits=edits,originalPrefixUnavailable=True,relocatedCPUProbe=probe,imageLibrary=image,ordinaryHashLockedDependencies=sorted(wanted),consoleEntryPointsTested=False)
+        except BaseException as error:
+          report['failureType']=type(error).__name__
         finally:
-            with open(os.environ['GITHUB_OUTPUT'],'a') as stream: stream.write('within-budget='+str(ok).lower()+'\n')
+          report['phases']=getattr(locals().get('helper'),'PHASES',[])
+          save(out/'relocation-result.json',report)
+        sys.exit(0 if report['passed'] else 1)
         PY
-    - name: Upload closed bounded public evidence
-      if: ${{ always() && steps.artifact-budget.outputs.within-budget == 'true' }}
-      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+    - name: Close bounded text evidence
+      id: evidence
+      if: always()
+      run: |
+        python3 -B - <<'PY'
+        import os,stat
+        from pathlib import Path
+        temp=Path(os.environ['RUNNER_TEMP']).resolve();source=temp/'public-intel-relocation-evidence';target=temp/'public-intel-relocation-upload';target.mkdir();total=0
+        for path in sorted(source.rglob('*')):
+          mode=path.lstat().st_mode
+          if stat.S_ISDIR(mode):continue
+          if path.is_symlink() or not stat.S_ISREG(mode):raise ValueError('Only regular text evidence')
+          if path.suffix.lower() not in ('.json','.log','.txt','.md') and not path.name.upper().startswith(('LICENSE','COPYING','NOTICE')):raise ValueError('Only diagnostic text/notices')
+          dest=target/path.relative_to(source);dest.parent.mkdir(parents=True,exist_ok=True)
+          with path.open('rb') as src,dest.open('xb') as dst:
+            while True:
+              block=src.read(min(1024*1024,20*1024*1024-total+1))
+              if not block:break
+              total+=len(block)
+              if total>20*1024*1024:raise ValueError('Evidence exceeds20MiB')
+              dst.write(block)
+        with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('ready=true\n')
+        PY
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      if: ${{ always() && steps.evidence.outputs.ready == 'true' }}
       with:
-        name: public-cpu-${{ inputs.architecture || 'x86_64' }}-${{ github.run_id }}
-        path: ${{ runner.temp }}/public-cpu-artifacts/
+        name: public-intel-relocation-${{ github.run_id }}
+        path: ${{ runner.temp }}/public-intel-relocation-upload/
         retention-days: 1
         if-no-files-found: error
-        include-hidden-files: false
